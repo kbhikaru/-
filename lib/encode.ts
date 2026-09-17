@@ -1,8 +1,12 @@
 import type { Slot } from "./types";
 
+export type ShareSource = {
+  label: string;
+  url: string;
+};
+
 export type SharePayload = {
-  /** Labels of the calendars that were combined, for display only. */
-  labels: string[];
+  sources: ShareSource[];
   common: Slot[];
   generatedAt: string;
 };
@@ -32,7 +36,9 @@ export function encodeShare(payload: SharePayload): string {
 export function decodeShare(encoded: string): SharePayload | null {
   try {
     const parsed = JSON.parse(base64UrlDecode(encoded));
-    if (!parsed || !Array.isArray(parsed.common)) return null;
+    if (!parsed || !Array.isArray(parsed.common) || !Array.isArray(parsed.sources)) {
+      return null;
+    }
     return parsed as SharePayload;
   } catch {
     return null;

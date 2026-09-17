@@ -1,6 +1,7 @@
 import { decodeShare } from "@/lib/encode";
 import { groupSlotsByDay, formatSlotRange, formatSlotsAsText } from "@/lib/format";
 import CopyTextButton from "@/components/CopyTextButton";
+import OpenBookingLinks from "@/components/OpenBookingLinks";
 
 export default async function SharePage({
   searchParams,
@@ -25,7 +26,7 @@ export default async function SharePage({
     <main>
       <h1>共通の空き時間</h1>
       <p className="subtitle">
-        {payload.labels.join(" / ")} の共通の空き時間です(すべて日本時間)。
+        {payload.sources.map((s) => s.label).join(" / ")} の共通の空き時間です(すべて日本時間)。
       </p>
 
       <div className="panel">
@@ -39,6 +40,7 @@ export default async function SharePage({
               {group.slots.map((slot, idx) => (
                 <div className="slot-item" key={idx}>
                   <span>{formatSlotRange(slot)}</span>
+                  <OpenBookingLinks sources={payload.sources} />
                 </div>
               ))}
             </li>

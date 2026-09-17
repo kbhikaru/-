@@ -5,6 +5,7 @@ import type { CalendarSource, ScrapeResponse } from "@/lib/types";
 import { encodeShare } from "@/lib/encode";
 import { groupSlotsByDay, formatSlotRange, formatSlotsAsText } from "@/lib/format";
 import CopyTextButton from "@/components/CopyTextButton";
+import OpenBookingLinks from "@/components/OpenBookingLinks";
 
 type FormSource = CalendarSource & { id: number };
 
@@ -75,10 +76,17 @@ export default function Home() {
     }
   }
 
+  const groups = result ? groupSlotsByDay(result.common) : [];
+  const bookingSources = result
+    ? result.calendars
+        .filter((c) => !c.error)
+        .map((c) => ({ label: c.label, url: c.url }))
+    : [];
+
   function handleShare() {
     if (!result) return;
     const encoded = encodeShare({
-      labels: result.calendars.map((c) => c.label),
+      sources: bookingSources,
       common: result.common,
       generatedAt: new Date().toISOString(),
     });
@@ -86,8 +94,6 @@ export default function Home() {
     setShareUrl(url);
     navigator.clipboard?.writeText(url).catch(() => {});
   }
-
-  const groups = result ? groupSlotsByDay(result.common) : [];
 
   return (
     <main>
@@ -191,6 +197,7 @@ export default function Home() {
                 {group.slots.map((slot, idx) => (
                   <div className="slot-item" key={idx}>
                     <span>{formatSlotRange(slot)}</span>
+                    <OpenBookingLinks sources={bookingSources} />
                   </div>
                 ))}
               </li>

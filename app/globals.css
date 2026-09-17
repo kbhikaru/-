@@ -148,11 +148,30 @@ button:disabled {
 .slot-item {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   margin-bottom: 6px;
   font-size: 0.95rem;
+}
+
+.booking-links {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.booking-links a {
+  font-size: 0.8rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.booking-links a:hover {
+  text-decoration: underline;
 }
 
 .calendar-status {
