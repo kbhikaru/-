@@ -36,3 +36,15 @@ export function groupSlotsByDay(slots: Slot[]): { day: string; slots: Slot[] }[]
     )
     .map(([day, slots]) => ({ day, slots }));
 }
+
+export function formatSlotsAsText(
+  groups: { day: string; slots: Slot[] }[]
+): string {
+  return groups
+    .map(
+      (group) =>
+        `${group.day}\n` +
+        group.slots.map((s) => `  ${formatSlotRange(s)}`).join("\n")
+    )
+    .join("\n\n");
+}

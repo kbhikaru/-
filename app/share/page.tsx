@@ -1,5 +1,6 @@
 import { decodeShare } from "@/lib/encode";
-import { groupSlotsByDay, formatSlotRange } from "@/lib/format";
+import { groupSlotsByDay, formatSlotRange, formatSlotsAsText } from "@/lib/format";
+import CopyTextButton from "@/components/CopyTextButton";
 
 export default async function SharePage({
   searchParams,
@@ -43,6 +44,9 @@ export default async function SharePage({
             </li>
           ))}
         </ul>
+        {groups.length > 0 && (
+          <CopyTextButton text={formatSlotsAsText(groups)} />
+        )}
       </div>
     </main>
   );

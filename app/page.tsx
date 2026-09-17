@@ -3,7 +3,8 @@
 import { useState } from "react";
 import type { CalendarSource, ScrapeResponse } from "@/lib/types";
 import { encodeShare } from "@/lib/encode";
-import { groupSlotsByDay, formatSlotRange } from "@/lib/format";
+import { groupSlotsByDay, formatSlotRange, formatSlotsAsText } from "@/lib/format";
+import CopyTextButton from "@/components/CopyTextButton";
 
 type FormSource = CalendarSource & { id: number };
 
@@ -198,9 +199,12 @@ export default function Home() {
 
           {groups.length > 0 && (
             <>
-              <button className="primary" onClick={handleShare}>
-                共有リンクを作成してコピー
-              </button>
+              <div className="row">
+                <button className="primary" onClick={handleShare}>
+                  共有リンクを作成してコピー
+                </button>
+                <CopyTextButton text={formatSlotsAsText(groups)} />
+              </div>
               {shareUrl && (
                 <div className="share-box">
                   <input readOnly value={shareUrl} />
