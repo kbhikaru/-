@@ -1,31 +1,35 @@
-import { chromium, type Browser, type Locator, type Page } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import type { Slot } from "./types";
 
 /**
  * Google Calendar の「予約スケジュール」ページ (calendar.google.com/calendar/appointments/...)
  * は公開APIを持たないため、実際に画面をレンダリングして DOM から読み取っている。
  *
- * 実ページの調査で分かったこと: 空き時間ボタンは `data-date-time` 属性に
- * 「その枠の開始時刻」を UTC のミリ秒 Unix タイムスタンプで持っている
- * (例: data-date-time="1789689600000", aria-label="09:00" は 2026-09-18 09:00 JST)。
- * これはテキストやページのタイムゾーン表示を解析するより遥かに正確なので、
- * テキストベースの時刻・タイムゾーン解析は行わず、この属性を直接使う。
+ * 実ページの調査(利用者が DevTools で確認)で分かったこと:
+ * - ページは「小さいカレンダーで日付をクリックして枠を切り替える」形式ではなく、
+ *   日付ごとのセクション (`<div role="list" aria-label="2026年 9月 18日 ...">`) が
+ *   縦に並んだリスト形式。クリック操作は不要で、下にスクロールすると
+ *   さらに先の日付のセクションが読み込まれる。
+ * - 各時刻枠は `<button data-date-time="1789686000000" aria-label="08:00">` のように、
+ *   開始時刻を **UTC ミリ秒の Unix タイムスタンプ** で持っている
+ *   (1789686000000 は 2026-09-18T08:00 JST)。テキストやページのタイムゾーン表示を
+ *   解析するより遥かに正確なので、この属性を直接使う。
  *
- * 日付選択カレンダー側のボタンも同じ内部コンポーネントを再利用しているとみられ、
- * 同様に `data-date-time`(その日の 0 時)を持つ想定で実装している。もし Google 側の
- * マークアップが変わって日付が拾えなくなった場合は、SCRAPE_DEBUG=1 で実行し
- * 保存される /tmp/avail-match-debug-*.png / .html を見ながら調整すること。
+ * もし Google 側のマークアップが変わってこの方式が通用しなくなった場合は、
+ * SCRAPE_DEBUG=1 で実行し保存される /tmp/avail-match-debug-*.png / .html を
+ * 見ながら `collectSlotEpochs` / `scrollForMore` を調整すること。
  */
 
 const DEBUG = process.env.SCRAPE_DEBUG === "1";
 
 // 時刻枠ボタンの aria-label は "9:00" / "09:00" のような時刻のみのテキストになっている。
-// これで「日付セル(フルの日付ラベル)」と「時刻枠(時刻のみのラベル)」を区別する。
 const TIME_ONLY_LABEL_RE = /^\d{1,2}:\d{2}$/;
 
 const JST_OFFSET_MS = 9 * 60 * 60_000;
 const DEFAULT_SLOT_DURATION_MS = 30 * 60_000;
 const MAX_SLOT_DURATION_MS = 2 * 60 * 60_000;
+const MAX_SCROLL_ITERATIONS = 25;
+const MAX_STALE_SCROLLS = 3;
 
 export type ScrapeOneResult = {
   slots: Slot[];
@@ -45,63 +49,38 @@ function jstTodayStartMs(): number {
   );
 }
 
-type DateButton = { locator: Locator; epochMs: number };
-
-/** [data-date-time] を持つ要素のうち、aria-label が「日付」を表すもの(時刻のみではないもの)を集める。 */
-async function collectDayButtons(page: Page): Promise<DateButton[]> {
-  const all = page.locator("[data-date-time]");
-  const count = await all.count();
-  const days: DateButton[] = [];
-  for (let i = 0; i < count; i++) {
-    const el = all.nth(i);
-    const label = ((await el.getAttribute("aria-label")) ?? "").trim();
-    if (TIME_ONLY_LABEL_RE.test(label)) continue; // これは時刻枠ボタン
-
-    const raw = await el.getAttribute("data-date-time");
-    if (!raw) continue;
-    const epochMs = Number(raw);
-    if (Number.isNaN(epochMs)) continue;
-
-    const ariaDisabled = (await el.getAttribute("aria-disabled")) === "true";
-    if (ariaDisabled) continue;
-    const isDisabled = await el.isDisabled().catch(() => false);
-    if (isDisabled) continue;
-
-    days.push({ locator: el, epochMs });
-  }
-  return days;
-}
-
-/** 現在表示中の時刻枠ボタン(aria-label が時刻のみ)の開始時刻(UTC ミリ秒)一覧を集める。 */
+/** ページ上に現在レンダリングされている時刻枠ボタンの開始時刻(UTC ミリ秒)一覧を集める。 */
 async function collectSlotEpochs(page: Page): Promise<number[]> {
-  const all = page.locator("[data-date-time]");
-  const count = await all.count();
-  const epochs: number[] = [];
-  for (let i = 0; i < count; i++) {
-    const el = all.nth(i);
-    const label = ((await el.getAttribute("aria-label")) ?? "").trim();
-    if (!TIME_ONLY_LABEL_RE.test(label)) continue;
-    const raw = await el.getAttribute("data-date-time");
-    if (!raw) continue;
-    const epochMs = Number(raw);
-    if (!Number.isNaN(epochMs)) epochs.push(epochMs);
-  }
-  return epochs;
+  return page.evaluate((timeOnlyPattern) => {
+    const re = new RegExp(timeOnlyPattern);
+    const epochs: number[] = [];
+    for (const el of Array.from(document.querySelectorAll("[data-date-time]"))) {
+      const label = (el.getAttribute("aria-label") ?? "").trim();
+      if (!re.test(label)) continue;
+      const raw = el.getAttribute("data-date-time");
+      if (!raw) continue;
+      const epochMs = Number(raw);
+      if (!Number.isNaN(epochMs)) epochs.push(epochMs);
+    }
+    return epochs;
+  }, TIME_ONLY_LABEL_RE.source);
 }
 
-async function clickNextMonth(page: Page): Promise<boolean> {
-  const candidates = [
-    page.getByRole("button", { name: /next month/i }),
-    page.getByRole("button", { name: /翌月|次の月/ }),
-  ];
-  for (const locator of candidates) {
-    if ((await locator.count()) > 0) {
-      await locator.first().click();
-      await page.waitForTimeout(500);
-      return true;
+/**
+ * さらに先の日付を読み込ませるためにスクロールする。ウィンドウ全体だけでなく、
+ * 内部にスクロール可能な要素があればそれも一番下までスクロールしておく
+ * (実際の予約ページのスクロールコンテナが不明なため、両方試す)。
+ */
+async function scrollForMore(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>("*"))) {
+      if (el.scrollHeight > el.clientHeight + 80) {
+        el.scrollTop = el.scrollHeight;
+      }
     }
-  }
-  return false;
+    window.scrollTo(0, document.body.scrollHeight);
+  });
+  await page.mouse.wheel(0, 1200);
 }
 
 async function saveDebugArtifacts(page: Page, tag: string) {
@@ -120,7 +99,7 @@ async function saveDebugArtifacts(page: Page, tag: string) {
   }
 }
 
-/** 連続する枠の最小間隔を「1枠の長さ」とみなす(例: 30分刻みなら30分)。 */
+/** 連続する枠の最小間隔を「1枠の長さ」とみなす(例: 1時間刻みなら1時間)。 */
 function inferSlotDurationMs(sortedEpochs: number[]): number {
   let minGap = Infinity;
   for (let i = 1; i < sortedEpochs.length; i++) {
@@ -139,50 +118,38 @@ async function scrapeOnePage(
   await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
   await page.waitForTimeout(1000);
 
-  const rangeStartMs = jstTodayStartMs() - 86_400_000; // 前日分の余裕
   const rangeEndMs = jstTodayStartMs() + days * 86_400_000;
 
   const slotEpochs = new Set<number>();
-  const clickedDayEpochs = new Set<number>();
+  let staleScrolls = 0;
 
-  // ページを開いた時点でどこかの日(例: 当日)がデフォルトで選択され、
-  // 日付をクリックしなくても時刻枠が最初から表示されている場合があるので、
-  // 日付ボタンの検出とは無関係にまず一度そのまま拾っておく。
-  for (const epoch of await collectSlotEpochs(page)) {
-    slotEpochs.add(epoch);
-  }
-
-  for (let monthPage = 0; monthPage < 4; monthPage++) {
-    const dayButtons = await collectDayButtons(page);
-    if (dayButtons.length === 0) break;
-
-    let maxEpochSeen = -Infinity;
-    for (const day of dayButtons) {
-      maxEpochSeen = Math.max(maxEpochSeen, day.epochMs);
-      if (day.epochMs < rangeStartMs || day.epochMs > rangeEndMs) continue;
-      if (clickedDayEpochs.has(day.epochMs)) continue;
-      clickedDayEpochs.add(day.epochMs);
-
-      try {
-        await day.locator.click({ timeout: 5000 });
-      } catch {
-        continue;
-      }
-      await page.waitForTimeout(400);
-
-      for (const epoch of await collectSlotEpochs(page)) {
-        slotEpochs.add(epoch);
-      }
+  for (let i = 0; i < MAX_SCROLL_ITERATIONS; i++) {
+    const before = slotEpochs.size;
+    for (const epoch of await collectSlotEpochs(page)) {
+      slotEpochs.add(epoch);
     }
 
-    if (maxEpochSeen >= rangeEndMs) break;
-    const advanced = await clickNextMonth(page);
-    if (!advanced) break;
+    const maxEpochSoFar = slotEpochs.size
+      ? Math.max(...slotEpochs)
+      : -Infinity;
+    if (maxEpochSoFar >= rangeEndMs) break;
+
+    if (slotEpochs.size === before) {
+      staleScrolls++;
+      if (staleScrolls >= MAX_STALE_SCROLLS) break; // これ以上増えない = 読み込み終わり
+    } else {
+      staleScrolls = 0;
+    }
+
+    await scrollForMore(page);
+    await page.waitForTimeout(600);
   }
 
   await saveDebugArtifacts(page, new URL(url).pathname.replace(/\W+/g, "_"));
 
-  const sortedEpochs = Array.from(slotEpochs).sort((a, b) => a - b);
+  const sortedEpochs = Array.from(slotEpochs)
+    .filter((epoch) => epoch < rangeEndMs)
+    .sort((a, b) => a - b);
   const durationMs = inferSlotDurationMs(sortedEpochs);
   const slots: Slot[] = sortedEpochs.map((epoch) => ({
     startISO: new Date(epoch).toISOString(),
