@@ -1,0 +1,28 @@
+{
+  "name": "avail-match",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Google カレンダー予約ページを複数入力し、共通の空き時間を計算して共有するツール",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "postinstall": "playwright install --with-deps chromium || true"
+  },
+  "dependencies": {
+    "next": "^15.5.4",
+    "playwright": "^1.55.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.6",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
