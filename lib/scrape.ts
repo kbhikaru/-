@@ -145,6 +145,13 @@ async function scrapeOnePage(
   const slotEpochs = new Set<number>();
   const clickedDayEpochs = new Set<number>();
 
+  // ページを開いた時点でどこかの日(例: 当日)がデフォルトで選択され、
+  // 日付をクリックしなくても時刻枠が最初から表示されている場合があるので、
+  // 日付ボタンの検出とは無関係にまず一度そのまま拾っておく。
+  for (const epoch of await collectSlotEpochs(page)) {
+    slotEpochs.add(epoch);
+  }
+
   for (let monthPage = 0; monthPage < 4; monthPage++) {
     const dayButtons = await collectDayButtons(page);
     if (dayButtons.length === 0) break;
