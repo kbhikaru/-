@@ -161,8 +161,8 @@ export default function Home() {
                 {c.label}:{" "}
                 {c.error
                   ? `取得エラー (${c.error})`
-                  : `${c.slots.length} 件の空き枠を検出 / タイムゾーン: ${
-                      c.timeZone ?? "検出できず(デフォルトのJSTで計算)"
+                  : `${c.slots.length} 件の空き枠を検出${
+                      c.timeZone ? ` / ${c.timeZone}` : ""
                     }`}
               </p>
               {!c.error && c.slots.length > 0 && (
