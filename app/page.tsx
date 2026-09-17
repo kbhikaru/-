@@ -156,12 +156,25 @@ export default function Home() {
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>各カレンダーの取得結果</h2>
           {result.calendars.map((c) => (
-            <p className="calendar-status" key={c.url}>
-              {c.label}:{" "}
-              {c.error
-                ? `取得エラー (${c.error})`
-                : `${c.slots.length} 件の空き枠を検出`}
-            </p>
+            <div key={c.url} style={{ marginBottom: 10 }}>
+              <p className="calendar-status" style={{ marginBottom: 2 }}>
+                {c.label}:{" "}
+                {c.error
+                  ? `取得エラー (${c.error})`
+                  : `${c.slots.length} 件の空き枠を検出 / タイムゾーン: ${
+                      c.timeZone ?? "検出できず(デフォルトのJSTで計算)"
+                    }`}
+              </p>
+              {!c.error && c.slots.length > 0 && (
+                <p className="calendar-status" style={{ marginBottom: 0 }}>
+                  最初の枠の例:{" "}
+                  {c.slots
+                    .slice(0, 3)
+                    .map((s) => formatSlotRange(s))
+                    .join(" / ")}
+                </p>
+              )}
+            </div>
           ))}
 
           <h2>共通の空き時間</h2>
