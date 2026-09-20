@@ -3,7 +3,9 @@
 import { useState } from "react";
 import type { CalendarSource, ScrapeResponse } from "@/lib/types";
 import { encodeShare } from "@/lib/encode";
-import { groupSlotsByDay, formatSlotRange } from "@/lib/format";
+import { groupSlotsByDay, formatSlotRange, formatSlotsAsText } from "@/lib/format";
+import CopyTextButton from "@/components/CopyTextButton";
+import OpenBookingLinks from "@/components/OpenBookingLinks";
 
 type FormSource = CalendarSource & { id: number };
 
@@ -74,10 +76,17 @@ export default function Home() {
     }
   }
 
+  const groups = result ? groupSlotsByDay(result.common) : [];
+  const bookingSources = result
+    ? result.calendars
+        .filter((c) => !c.error)
+        .map((c) => ({ label: c.label, url: c.url }))
+    : [];
+
   function handleShare() {
     if (!result) return;
     const encoded = encodeShare({
-      labels: result.calendars.map((c) => c.label),
+      sources: bookingSources,
       common: result.common,
       generatedAt: new Date().toISOString(),
     });
@@ -85,8 +94,6 @@ export default function Home() {
     setShareUrl(url);
     navigator.clipboard?.writeText(url).catch(() => {});
   }
-
-  const groups = result ? groupSlotsByDay(result.common) : [];
 
   return (
     <main>
@@ -156,12 +163,25 @@ export default function Home() {
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>各カレンダーの取得結果</h2>
           {result.calendars.map((c) => (
-            <p className="calendar-status" key={c.url}>
-              {c.label}:{" "}
-              {c.error
-                ? `取得エラー (${c.error})`
-                : `${c.slots.length} 件の空き枠を検出`}
-            </p>
+            <div key={c.url} style={{ marginBottom: 10 }}>
+              <p className="calendar-status" style={{ marginBottom: 2 }}>
+                {c.label}:{" "}
+                {c.error
+                  ? `取得エラー (${c.error})`
+                  : `${c.slots.length} 件の空き枠を検出${
+                      c.timeZone ? ` / ${c.timeZone}` : ""
+                    }`}
+              </p>
+              {!c.error && c.slots.length > 0 && (
+                <p className="calendar-status" style={{ marginBottom: 0 }}>
+                  最初の枠の例:{" "}
+                  {c.slots
+                    .slice(0, 3)
+                    .map((s) => formatSlotRange(s))
+                    .join(" / ")}
+                </p>
+              )}
+            </div>
           ))}
 
           <h2>共通の空き時間</h2>
@@ -177,6 +197,7 @@ export default function Home() {
                 {group.slots.map((slot, idx) => (
                   <div className="slot-item" key={idx}>
                     <span>{formatSlotRange(slot)}</span>
+                    <OpenBookingLinks sources={bookingSources} />
                   </div>
                 ))}
               </li>
@@ -185,9 +206,12 @@ export default function Home() {
 
           {groups.length > 0 && (
             <>
-              <button className="primary" onClick={handleShare}>
-                共有リンクを作成してコピー
-              </button>
+              <div className="row">
+                <button className="primary" onClick={handleShare}>
+                  共有リンクを作成してコピー
+                </button>
+                <CopyTextButton text={formatSlotsAsText(groups)} />
+              </div>
               {shareUrl && (
                 <div className="share-box">
                   <input readOnly value={shareUrl} />

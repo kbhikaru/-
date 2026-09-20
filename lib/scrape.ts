@@ -3,12 +3,33 @@ import type { Slot } from "./types";
 
 /**
  * Google Calendar の「予約スケジュール」ページ (calendar.google.com/calendar/appointments/...)
- * は公開APIを持たないため、ここでは実際に画面をレンダリングして DOM からテキストを読み取っている。
- * Google 側の UI 変更で壊れる可能性が高い。壊れた場合は SCRAPE_DEBUG=1 で実行し、
- * 保存されるスクリーンショット/HTML (/tmp/avail-match-debug-*) を見てセレクタ/正規表現を調整すること。
+ * は公開APIを持たないため、実際に画面をレンダリングして DOM から読み取っている。
+ *
+ * 実ページの調査(利用者が DevTools で確認)で分かったこと:
+ * - ページは「小さいカレンダーで日付をクリックして枠を切り替える」形式ではなく、
+ *   日付ごとのセクション (`<div role="list" aria-label="2026年 9月 18日 ...">`) が
+ *   縦に並んだリスト形式。クリック操作は不要で、下にスクロールすると
+ *   さらに先の日付のセクションが読み込まれる。
+ * - 各時刻枠は `<button data-date-time="1789686000000" aria-label="08:00">` のように、
+ *   開始時刻を **UTC ミリ秒の Unix タイムスタンプ** で持っている
+ *   (1789686000000 は 2026-09-18T08:00 JST)。テキストやページのタイムゾーン表示を
+ *   解析するより遥かに正確なので、この属性を直接使う。
+ *
+ * もし Google 側のマークアップが変わってこの方式が通用しなくなった場合は、
+ * SCRAPE_DEBUG=1 で実行し保存される /tmp/avail-match-debug-*.png / .html を
+ * 見ながら `collectSlotEpochs` / `scrollForMore` を調整すること。
  */
 
 const DEBUG = process.env.SCRAPE_DEBUG === "1";
+
+// 時刻枠ボタンの aria-label は "9:00" / "09:00" のような時刻のみのテキストになっている。
+const TIME_ONLY_LABEL_RE = /^\d{1,2}:\d{2}$/;
+
+const JST_OFFSET_MS = 9 * 60 * 60_000;
+const DEFAULT_SLOT_DURATION_MS = 30 * 60_000;
+const MAX_SLOT_DURATION_MS = 2 * 60 * 60_000;
+const MAX_SCROLL_ITERATIONS = 25;
+const MAX_STALE_SCROLLS = 3;
 
 export type ScrapeOneResult = {
   slots: Slot[];
@@ -16,94 +37,50 @@ export type ScrapeOneResult = {
   error?: string;
 };
 
-const TIME_RANGE_RE =
-  /(\d{1,2}:\d{2})\s*(AM|PM|am|pm)?\s*[–—-]\s*(\d{1,2}:\d{2})\s*(AM|PM|am|pm)?/;
-
-const GMT_OFFSET_RE = /GMT\s*([+-])(\d{1,2}):?(\d{2})/;
-
-function to24h(hm: string, ampm?: string): { h: number; m: number } {
-  const [hStr, mStr] = hm.split(":");
-  let h = parseInt(hStr, 10);
-  const m = parseInt(mStr, 10);
-  if (ampm) {
-    const upper = ampm.toUpperCase();
-    if (upper === "PM" && h !== 12) h += 12;
-    if (upper === "AM" && h === 12) h = 0;
-  }
-  return { h, m };
+/** "今日 0:00 JST" を絶対 UTC ミリ秒で返す。ホストサーバーのタイムゾーンに依存しない。 */
+function jstTodayStartMs(): number {
+  const jstNow = new Date(Date.now() + JST_OFFSET_MS);
+  return (
+    Date.UTC(
+      jstNow.getUTCFullYear(),
+      jstNow.getUTCMonth(),
+      jstNow.getUTCDate()
+    ) - JST_OFFSET_MS
+  );
 }
 
-/** Build a UTC ISO string from a local y/m/d h:m and a GMT offset in minutes (e.g. +540 for JST). */
-function toUtcISO(
-  year: number,
-  month1to12: number,
-  day: number,
-  h: number,
-  m: number,
-  offsetMinutes: number
-): string {
-  const utcMs =
-    Date.UTC(year, month1to12 - 1, day, h, m, 0) - offsetMinutes * 60_000;
-  return new Date(utcMs).toISOString();
-}
-
-function parseGmtOffsetMinutes(pageText: string): number | null {
-  const match = pageText.match(GMT_OFFSET_RE);
-  if (!match) return null;
-  const sign = match[1] === "-" ? -1 : 1;
-  const hours = parseInt(match[2], 10);
-  const minutes = parseInt(match[3], 10);
-  return sign * (hours * 60 + minutes);
-}
-
-/** Try to read the "September 2026" / "2026年9月" style month heading currently shown. */
-async function readVisibleMonthYear(
-  page: Page
-): Promise<{ year: number; month: number } | null> {
-  const headingCandidates = await page
-    .locator('[role="heading"], h1, h2')
-    .allTextContents();
-  for (const text of headingCandidates) {
-    const jp = text.match(/(\d{4})年\s*(\d{1,2})月/);
-    if (jp) return { year: parseInt(jp[1], 10), month: parseInt(jp[2], 10) };
-    const en = text.match(
-      /(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i
-    );
-    if (en) {
-      const months = [
-        "january",
-        "february",
-        "march",
-        "april",
-        "may",
-        "june",
-        "july",
-        "august",
-        "september",
-        "october",
-        "november",
-        "december",
-      ];
-      const month = months.indexOf(en[1].toLowerCase()) + 1;
-      return { year: parseInt(en[2], 10), month };
+/** ページ上に現在レンダリングされている時刻枠ボタンの開始時刻(UTC ミリ秒)一覧を集める。 */
+async function collectSlotEpochs(page: Page): Promise<number[]> {
+  return page.evaluate((timeOnlyPattern) => {
+    const re = new RegExp(timeOnlyPattern);
+    const epochs: number[] = [];
+    for (const el of Array.from(document.querySelectorAll("[data-date-time]"))) {
+      const label = (el.getAttribute("aria-label") ?? "").trim();
+      if (!re.test(label)) continue;
+      const raw = el.getAttribute("data-date-time");
+      if (!raw) continue;
+      const epochMs = Number(raw);
+      if (!Number.isNaN(epochMs)) epochs.push(epochMs);
     }
-  }
-  return null;
+    return epochs;
+  }, TIME_ONLY_LABEL_RE.source);
 }
 
-async function clickNextMonth(page: Page): Promise<boolean> {
-  const candidates = [
-    page.getByRole("button", { name: /next month/i }),
-    page.getByRole("button", { name: /翌月|次の月/ }),
-  ];
-  for (const locator of candidates) {
-    if ((await locator.count()) > 0) {
-      await locator.first().click();
-      await page.waitForTimeout(500);
-      return true;
+/**
+ * さらに先の日付を読み込ませるためにスクロールする。ウィンドウ全体だけでなく、
+ * 内部にスクロール可能な要素があればそれも一番下までスクロールしておく
+ * (実際の予約ページのスクロールコンテナが不明なため、両方試す)。
+ */
+async function scrollForMore(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>("*"))) {
+      if (el.scrollHeight > el.clientHeight + 80) {
+        el.scrollTop = el.scrollHeight;
+      }
     }
-  }
-  return false;
+    window.scrollTo(0, document.body.scrollHeight);
+  });
+  await page.mouse.wheel(0, 1200);
 }
 
 async function saveDebugArtifacts(page: Page, tag: string) {
@@ -122,6 +99,17 @@ async function saveDebugArtifacts(page: Page, tag: string) {
   }
 }
 
+/** 連続する枠の最小間隔を「1枠の長さ」とみなす(例: 1時間刻みなら1時間)。 */
+function inferSlotDurationMs(sortedEpochs: number[]): number {
+  let minGap = Infinity;
+  for (let i = 1; i < sortedEpochs.length; i++) {
+    const gap = sortedEpochs[i] - sortedEpochs[i - 1];
+    if (gap > 0 && gap < minGap) minGap = gap;
+  }
+  if (!Number.isFinite(minGap) || minGap <= 0) return DEFAULT_SLOT_DURATION_MS;
+  return Math.min(minGap, MAX_SLOT_DURATION_MS);
+}
+
 async function scrapeOnePage(
   page: Page,
   url: string,
@@ -130,104 +118,48 @@ async function scrapeOnePage(
   await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
   await page.waitForTimeout(1000);
 
-  const pageText = await page.evaluate(() => document.body.innerText);
-  const offsetMinutes = parseGmtOffsetMinutes(pageText) ?? 9 * 60; // default: JST
-  const timeZoneLabel = pageText.match(GMT_OFFSET_RE)?.[0] ?? null;
+  const rangeEndMs = jstTodayStartMs() + days * 86_400_000;
 
-  const today = new Date();
-  const rangeEnd = new Date(today.getTime() + days * 86_400_000);
+  const slotEpochs = new Set<number>();
+  let staleScrolls = 0;
 
-  const slots: Slot[] = [];
-  const seenMonths = new Set<string>();
-
-  for (let monthIndex = 0; monthIndex < 3; monthIndex++) {
-    const visibleMonth = await readVisibleMonthYear(page);
-    const monthKey = visibleMonth
-      ? `${visibleMonth.year}-${visibleMonth.month}`
-      : `unknown-${monthIndex}`;
-    if (seenMonths.has(monthKey)) break;
-    seenMonths.add(monthKey);
-
-    // Day cells: Google's Material date-picker style renders each selectable day as a
-    // role="button" or role="gridcell" element whose accessible name contains the day number.
-    const dayButtons = page.locator(
-      '[role="gridcell"] [role="button"], [role="grid"] [role="button"], td[role="gridcell"]'
-    );
-    const count = await dayButtons.count();
-
-    for (let i = 0; i < count; i++) {
-      const cell = dayButtons.nth(i);
-      const disabled = await cell.getAttribute("aria-disabled");
-      if (disabled === "true") continue;
-
-      const label = (await cell.getAttribute("aria-label")) ?? "";
-      const text = (await cell.textContent()) ?? "";
-      const dayNumMatch = (label || text).match(/(\d{1,2})/);
-      if (!dayNumMatch || !visibleMonth) continue;
-      const day = parseInt(dayNumMatch[1], 10);
-
-      const cellDate = new Date(
-        Date.UTC(visibleMonth.year, visibleMonth.month - 1, day)
-      );
-      if (cellDate < new Date(today.toDateString()) || cellDate > rangeEnd) {
-        continue;
-      }
-
-      try {
-        await cell.click({ timeout: 5000 });
-      } catch {
-        continue;
-      }
-      await page.waitForTimeout(400);
-
-      const slotButtons = page.getByRole("button");
-      const slotCount = await slotButtons.count();
-      for (let s = 0; s < slotCount; s++) {
-        const slotText = (await slotButtons.nth(s).textContent()) ?? "";
-        const match = slotText.match(TIME_RANGE_RE);
-        if (!match) continue;
-        const start = to24h(match[1], match[2]);
-        const end = to24h(match[3], match[4]);
-        slots.push({
-          startISO: toUtcISO(
-            visibleMonth.year,
-            visibleMonth.month,
-            day,
-            start.h,
-            start.m,
-            offsetMinutes
-          ),
-          endISO: toUtcISO(
-            visibleMonth.year,
-            visibleMonth.month,
-            day,
-            end.h,
-            end.m,
-            offsetMinutes
-          ),
-        });
-      }
+  for (let i = 0; i < MAX_SCROLL_ITERATIONS; i++) {
+    const before = slotEpochs.size;
+    for (const epoch of await collectSlotEpochs(page)) {
+      slotEpochs.add(epoch);
     }
 
-    if (cellDateExceedsRange(visibleMonth, rangeEnd)) break;
-    const advanced = await clickNextMonth(page);
-    if (!advanced) break;
+    const maxEpochSoFar = slotEpochs.size
+      ? Math.max(...slotEpochs)
+      : -Infinity;
+    if (maxEpochSoFar >= rangeEndMs) break;
+
+    if (slotEpochs.size === before) {
+      staleScrolls++;
+      if (staleScrolls >= MAX_STALE_SCROLLS) break; // これ以上増えない = 読み込み終わり
+    } else {
+      staleScrolls = 0;
+    }
+
+    await scrollForMore(page);
+    await page.waitForTimeout(600);
   }
 
   await saveDebugArtifacts(page, new URL(url).pathname.replace(/\W+/g, "_"));
 
-  return { slots, timeZoneLabel };
-}
+  const sortedEpochs = Array.from(slotEpochs)
+    .filter((epoch) => epoch < rangeEndMs)
+    .sort((a, b) => a - b);
+  const durationMs = inferSlotDurationMs(sortedEpochs);
+  const slots: Slot[] = sortedEpochs.map((epoch) => ({
+    startISO: new Date(epoch).toISOString(),
+    endISO: new Date(epoch + durationMs).toISOString(),
+  }));
 
-function cellDateExceedsRange(
-  visibleMonth: { year: number; month: number } | null,
-  rangeEnd: Date
-): boolean {
-  if (!visibleMonth) return false;
-  const monthStart = new Date(
-    Date.UTC(visibleMonth.year, visibleMonth.month - 1, 1)
-  );
-  return monthStart > rangeEnd;
+  return {
+    slots,
+    timeZoneLabel: "ページのタイムスタンプ(UTC)を直接使用",
+  };
 }
 
 export async function scrapeAvailability(
